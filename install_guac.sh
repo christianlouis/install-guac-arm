@@ -58,7 +58,7 @@ done
 # --- Hostname detection (reverse DNS via Google DNS) ---
 SERVER_NAME=${SERVER_NAME:-}
 if [ -z "$SERVER_NAME" ]; then
-  PUBIP=$(curl -s ifconfig.me || echo "")
+  PUBIP=$(curl -4 -s ifconfig.me || echo "")
   if [ -n "$PUBIP" ]; then
     apt-get install -y -qq dnsutils >/dev/null 2>&1 || true
     REVNAME=$(dig +short -x $PUBIP @8.8.8.8 | sed 's/\.$//' || true)
