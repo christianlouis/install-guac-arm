@@ -14,8 +14,9 @@ GUAC_DB="guacamole_db"
 TOMCAT_VER=9.0.109
 CRED_FILE="/root/guacamole-credentials.txt"
 
-# --- Parameters (env or interactive) ---
+# --- Parameters (env, interactive, or reverse DNS fallback) ---
 SERVER_NAME=${SERVER_NAME:-}
+
 if [ -z "$SERVER_NAME" ]; then
   if [ -t 0 ]; then
     while true; do
@@ -24,8 +25,25 @@ if [ -z "$SERVER_NAME" ]; then
       echo -e "${RED}Server name cannot be empty!${NC}"
     done
   else
-    echo -e "${RED}ERROR: SERVER_NAME not provided and no TTY available${NC}"
-    exit 1
+    echo -e "${YELLOW}No SERVER_NAME provided, running non-interactively...${NC}"
+    PUBIP=$(curl -s ifconfig.me || echo "")
+    if [ -n "$PUBIP" ]; then
+      if command -v dig >/dev/null 2>&1; then
+        REVNAME=$(dig +short -x $PUBIP 2>/dev/null | sed 's/\.$//' || true)
+      else
+        REVNAME=$(host $PUBIP 2>/dev/null | awk '{print $5}' | sed 's/\.$//' || true)
+      fi
+      if [ -n "$REVNAME" ]; then
+        SERVER_NAME=$REVNAME
+        echo -e "${GREEN}Using reverse DNS for server name: ${SERVER_NAME}${NC}"
+      else
+        SERVER_NAME=$PUBIP
+        echo -e "${YELLOW}No reverse DNS found, using IP: ${SERVER_NAME}${NC}"
+      fi
+    else
+      echo -e "${RED}Unable to detect public IP. Please set SERVER_NAME explicitly.${NC}"
+      exit 1
+    fi
   fi
 fi
 
@@ -37,7 +55,7 @@ GUACADMIN_PWD=${GUACADMIN_PWD:-$(openssl rand -base64 20)}
 echo -e "${BLUE}>>> Installing base packages...${NC}"
 apt-get update -y
 DEBIAN_FRONTEND=noninteractive apt-get install -yq \
-    xfce4 xfce4-goodies tightvncserver ufw curl wget zsh firefox \
+    xfce4 xfce4-goodies tightvncserver ufw curl wget zsh firefox dnsutils \
     build-essential libjpeg-turbo8-dev libpng-dev libossp-uuid-dev \
     libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
     freerdp2-dev libpango1.0-dev libssh2-1-dev libtelnet-dev \
@@ -258,7 +276,12 @@ echo -e "${BLUE}>>> Installing Tailscale...${NC}"
 curl -fsSL https://tailscale.com/install.sh | sh
 systemctl enable --now tailscaled
 
-read -p "Enter Tailscale auth key (leave blank for interactive login): " TSKEY || true
+if [ -t 0 ]; then
+  read -p "Enter Tailscale auth key (leave blank for interactive login): " TSKEY || true
+else
+  TSKEY=""
+fi
+
 if [ -n "${TSKEY:-}" ]; then
   tailscale up --authkey=${TSKEY} --ssh
 else
