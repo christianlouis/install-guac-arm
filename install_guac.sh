@@ -32,16 +32,25 @@ if [ -z "${INSIDE_TMUX:-}" ]; then
   apt-get install -y tmux htop iftop
   export INSIDE_TMUX=1
 
-  SCRIPT_CMD="INSIDE_TMUX=1 $(realpath $0) $@"
+  SCRIPT_PATH="$(realpath "$0")"
+  SCRIPT_CMD="INSIDE_TMUX=1 bash \"$SCRIPT_PATH\" $*"
 
-  tmux new-session -d -s guac-install "echo '>>> Running: $SCRIPT_CMD'; sleep 3; $SCRIPT_CMD"
+  # Start tmux with installer in first window
+  tmux new-session -d -s guac-install \
+    "echo '>>> Running: $SCRIPT_CMD'; sleep 3; $SCRIPT_CMD"
+
+  # Add monitoring windows
   tmux split-window -h "htop"
   tmux split-window -v -t 0 "iftop -i \$(ip -o -4 route show to default | awk '{print \$5}' | head -n1)"
   tmux split-window -v -t 1 "tail -f /var/log/syslog"
+
   tmux select-layout tiled
   tmux attach -t guac-install
+
+  # Exit bootstrapper after attaching
   exit 0
 fi
+
 
 # ============================================================
 # Hostname detection (reverse DNS of IPv4)
