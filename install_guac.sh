@@ -12,25 +12,22 @@ GUACVERSION="1.5.5"
 GUAC_USER="guacamole_user"
 GUAC_DB="guacamole_db"
 TOMCAT_VER=9.0.109
+CRED_FILE="/root/guacamole-credentials.txt"
 
-# Root check
-if [ "$(id -u)" -ne 0 ]; then
-  echo -e "${RED}Please run as root${NC}"
-  exit 1
-fi
+# --- Secure password generation ---
+MYSQL_ROOT_PWD=$(openssl rand -base64 20)
+GUAC_PWD=$(openssl rand -base64 20)
+GUACADMIN_PWD=$(openssl rand -base64 20)
 
-# --- Interactive prompts ---
-read -p "Enter MySQL root password [default: password]: " MYSQL_ROOT_PWD
-MYSQL_ROOT_PWD=${MYSQL_ROOT_PWD:-password}
-
-read -p "Enter Guacamole DB user password [default: password]: " GUAC_PWD
-GUAC_PWD=${GUAC_PWD:-password}
-
-read -p "Enter server name (FQDN) for Nginx (e.g. guac.example.com): " SERVER_NAME
-if [ -z "$SERVER_NAME" ]; then
-  echo -e "${RED}Server name is required for Nginx reverse proxy${NC}"
-  exit 1
-fi
+# --- Server name prompt ---
+while true; do
+  read -p "Enter server name (FQDN) for Nginx/Let's Encrypt (e.g. guac.example.com): " SERVER_NAME
+  if [ -n "$SERVER_NAME" ]; then
+    break
+  else
+    echo -e "${RED}Server name cannot be empty!${NC}"
+  fi
+done
 
 # --- Base packages ---
 echo -e "${BLUE}>>> Installing base packages...${NC}"
@@ -42,7 +39,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -yq \
     freerdp2-dev libpango1.0-dev libssh2-1-dev libtelnet-dev \
     libvncserver-dev libpulse-dev libssl-dev libvorbis-dev libwebp-dev \
     libwebsockets-dev freerdp2-x11 libtool-bin ghostscript dpkg-dev crudini \
-    mariadb-server mariadb-client nginx
+    mariadb-server mariadb-client nginx certbot python3-certbot-nginx openssl
 
 # --- Java ---
 if ! command -v java >/dev/null 2>&1; then
@@ -52,50 +49,11 @@ JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))
 echo -e "${GREEN}JAVA_HOME detected as ${JAVA_HOME}${NC}"
 
 # --- Firewall ---
-echo -e "${BLUE}>>> Configuring UFW...${NC}"
 ufw --force enable
 ufw allow ssh
 ufw allow 80/tcp
 ufw allow 443/tcp
 ufw reload
-
-# --- VNC ---
-if [ ! -f "$HOME/.vnc/xstartup" ]; then
-  echo -e "${BLUE}>>> Configuring VNC server...${NC}"
-  umask 0077
-  mkdir -p "$HOME/.vnc"
-  vncpasswd -f <<<"password" >"$HOME/.vnc/passwd"
-  vncserver || true
-  sleep 2 && vncserver -kill :1 || true
-  cat > ~/.vnc/xstartup <<EOF
-#!/bin/bash
-xrdb \$HOME/.Xresources
-startxfce4 &
-EOF
-  chmod +x ~/.vnc/xstartup
-fi
-
-if [ ! -f /etc/systemd/system/vncserver@.service ]; then
-  cat > /etc/systemd/system/vncserver@.service <<EOF
-[Unit]
-Description=Start TightVNC server at startup
-After=syslog.target network.target
-[Service]
-Type=forking
-User=root
-Group=root
-WorkingDirectory=/root
-PIDFile=/root/.vnc/%H:%i.pid
-ExecStartPre=-/usr/bin/vncserver -kill :%i > /dev/null 2>&1
-ExecStart=/usr/bin/vncserver -depth 24 -geometry 1280x800 -localhost :%i
-ExecStop=/usr/bin/vncserver -kill :%i
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl daemon-reload
-  systemctl enable vncserver@1.service
-fi
-systemctl restart vncserver@1 || true
 
 # --- Tomcat 9 ---
 if [ ! -d /opt/apache-tomcat-${TOMCAT_VER} ]; then
@@ -133,7 +91,6 @@ systemctl enable --now tomcat9
 cd /root
 SERVER="https://downloads.apache.org/guacamole/${GUACVERSION}"
 
-# Download if missing
 if [ ! -d guacamole-server-${GUACVERSION} ]; then
   wget -q ${SERVER}/source/guacamole-server-${GUACVERSION}.tar.gz
   tar -xzf guacamole-server-${GUACVERSION}.tar.gz
@@ -142,7 +99,6 @@ if [ ! -d guacamole-server-${GUACVERSION} ]; then
   tar -xzf guacamole-auth-jdbc-${GUACVERSION}.tar.gz
 fi
 
-# Build guacd if not present
 if ! command -v guacd >/dev/null 2>&1; then
   cd guacamole-server-${GUACVERSION}
   ./configure --with-systemd-dir=/etc/systemd/system
@@ -152,7 +108,6 @@ if ! command -v guacd >/dev/null 2>&1; then
   cd ..
 fi
 
-# guacd service
 if [ ! -f /etc/systemd/system/guacd.service ]; then
   cat > /etc/systemd/system/guacd.service <<EOF
 [Unit]
@@ -172,13 +127,16 @@ fi
 systemctl daemon-reload
 systemctl enable --now guacd
 
-# Deploy webapp + extensions
 mkdir -p /etc/guacamole/extensions /etc/guacamole/lib
 cp /etc/guacamole.war /opt/tomcat9/webapps/guacamole.war
 cp guacamole-auth-jdbc-${GUACVERSION}/mysql/guacamole-auth-jdbc-mysql-${GUACVERSION}.jar /etc/guacamole/extensions/
 
-# MySQL setup (non-destructive)
+# --- MySQL setup ---
 echo -e "${BLUE}>>> Setting up MySQL database...${NC}"
+mysql -u root <<EOF
+ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PWD}';
+EOF
+
 if ! mysql -u root -p${MYSQL_ROOT_PWD} -e "USE ${GUAC_DB}" 2>/dev/null; then
   mysql -u root -p${MYSQL_ROOT_PWD} -e "CREATE DATABASE ${GUAC_DB};"
 fi
@@ -202,11 +160,14 @@ mysql-username: ${GUAC_USER}
 mysql-password: ${GUAC_PWD}
 EOF
 
+# Reset guacadmin password
+HASHED=$(echo -n "${GUACADMIN_PWD}" | openssl md5 | awk '{print $2}')
+mysql -u root -p${MYSQL_ROOT_PWD} ${GUAC_DB} -e "UPDATE guacamole_user SET password='${HASHED}' WHERE username='guacadmin';"
+
 systemctl restart tomcat9
 
-# --- Chrome ---
+# --- Chrome + Tampermonkey ---
 if ! command -v google-chrome >/dev/null 2>&1; then
-  echo -e "${BLUE}>>> Installing Google Chrome...${NC}"
   ARCH=$(dpkg --print-architecture)
   if [ "$ARCH" = "amd64" ]; then
     CHROME_DEB="https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
@@ -219,7 +180,6 @@ if ! command -v google-chrome >/dev/null 2>&1; then
   rm -f "$TMP_DEB"
 fi
 
-# --- Tampermonkey ---
 EXT_ID="dhdgffkkebhmkfjojejmpbldmpobfkfo"
 EXT_DIR="/opt/google/chrome/extensions"
 if [ ! -f "$EXT_DIR/$EXT_ID.json" ]; then
@@ -232,7 +192,6 @@ EOF
 fi
 
 # --- Nginx reverse proxy ---
-echo -e "${BLUE}>>> Configuring Nginx reverse proxy...${NC}"
 cat > /etc/nginx/sites-available/guacamole <<EOF
 server {
     listen 80;
@@ -249,16 +208,86 @@ server {
     }
 }
 EOF
-
 ln -sf /etc/nginx/sites-available/guacamole /etc/nginx/sites-enabled/guacamole
-nginx -t && systemctl restart nginx
+nginx -t && systemctl reload nginx
+
+# --- Let's Encrypt with fallback ---
+if certbot --nginx -d ${SERVER_NAME} --non-interactive --agree-tos -m admin@${SERVER_NAME} --redirect; then
+  echo -e "${GREEN}Let's Encrypt certificate installed successfully.${NC}"
+else
+  mkdir -p /etc/ssl/selfsigned
+  openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout /etc/ssl/selfsigned/guac.key \
+    -out /etc/ssl/selfsigned/guac.crt \
+    -subj "/CN=${SERVER_NAME}"
+  cat > /etc/nginx/sites-available/guacamole <<EOF
+server {
+    listen 80;
+    server_name ${SERVER_NAME};
+    return 301 https://\$host\$request_uri;
+}
+server {
+    listen 443 ssl;
+    server_name ${SERVER_NAME};
+    ssl_certificate /etc/ssl/selfsigned/guac.crt;
+    ssl_certificate_key /etc/ssl/selfsigned/guac.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080/guacamole/;
+        proxy_buffering off;
+        proxy_http_version 1.1;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$http_connection;
+        proxy_cookie_path /guacamole/ /;
+    }
+}
+EOF
+  nginx -t && systemctl reload nginx
+fi
+
+# --- Tailscale ---
+echo -e "${BLUE}>>> Installing Tailscale...${NC}"
+curl -fsSL https://tailscale.com/install.sh | sh
+systemctl enable --now tailscaled
+
+echo
+echo "Tailscale auth:"
+echo "  - Enter auth key (from https://login.tailscale.com/admin/settings/keys)"
+echo "  - Leave blank for interactive login"
+read -p "Tailscale auth key: " TSKEY
+if [ -n "$TSKEY" ]; then
+  tailscale up --authkey=${TSKEY} --ssh
+else
+  tailscale up --ssh
+fi
+
+# --- Save credentials ---
+cat > ${CRED_FILE} <<EOF
+Guacamole admin login:
+   User: guacadmin
+   Pass: ${GUACADMIN_PWD}
+
+MySQL root password:
+   ${MYSQL_ROOT_PWD}
+
+MySQL guacamole user (${GUAC_USER}) password:
+   ${GUAC_PWD}
+
+Server name:
+   ${SERVER_NAME}
+EOF
+chmod 600 ${CRED_FILE}
 
 # --- Final info ---
 IP=$(curl -s ifconfig.me || echo "localhost")
 echo -e "${GREEN}=========================================================${NC}"
 echo -e "Guacamole is now running behind Nginx."
-echo -e "URL:  http://${SERVER_NAME}/"
-echo -e "      http://${IP}/ (if DNS not set)"
-echo -e "Login: ${GREEN}guacadmin/guacadmin${NC}"
-echo -e "${RED}*** Change the default password immediately! ***${NC}"
+echo -e "URL:  https://${SERVER_NAME}/"
+echo -e "Alt:  https://${IP}/"
+echo -e "Login: guacadmin / ${GUACADMIN_PWD}"
+echo -e "MySQL root password:   ${MYSQL_ROOT_PWD}"
+echo -e "MySQL guac user pass:  ${GUAC_PWD}"
+echo -e "Credentials saved in:  ${CRED_FILE}"
+echo -e "${RED}*** Save them securely! ***${NC}"
 echo -e "${GREEN}=========================================================${NC}"
