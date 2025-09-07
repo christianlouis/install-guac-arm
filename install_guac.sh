@@ -14,20 +14,24 @@ GUAC_DB="guacamole_db"
 TOMCAT_VER=9.0.109
 CRED_FILE="/root/guacamole-credentials.txt"
 
-# --- Ask for parameters ---
-while true; do
-  read -p "Enter server name (FQDN) for Nginx/Let's Encrypt (e.g. guac.example.com): " SERVER_NAME
-  if [ -n "$SERVER_NAME" ]; then break; fi
-  echo -e "${RED}Server name cannot be empty!${NC}"
-done
+# --- Parameters (env or interactive) ---
+SERVER_NAME=${SERVER_NAME:-}
+if [ -z "$SERVER_NAME" ]; then
+  if [ -t 0 ]; then
+    while true; do
+      read -p "Enter server name (FQDN) for Nginx/Let's Encrypt (e.g. guac.example.com): " SERVER_NAME
+      [ -n "$SERVER_NAME" ] && break
+      echo -e "${RED}Server name cannot be empty!${NC}"
+    done
+  else
+    echo -e "${RED}ERROR: SERVER_NAME not provided and no TTY available${NC}"
+    exit 1
+  fi
+fi
 
-read -p "Advertise local LAN routes via Tailscale? (y/N): " ADV_ROUTES
-ADV_ROUTES=${ADV_ROUTES:-N}
-
-# --- Secure password generation ---
-MYSQL_ROOT_PWD=$(openssl rand -base64 20)
-GUAC_PWD=$(openssl rand -base64 20)
-GUACADMIN_PWD=$(openssl rand -base64 20)
+MYSQL_ROOT_PWD=${MYSQL_ROOT_PWD:-$(openssl rand -base64 20)}
+GUAC_PWD=${GUAC_PWD:-$(openssl rand -base64 20)}
+GUACADMIN_PWD=${GUACADMIN_PWD:-$(openssl rand -base64 20)}
 
 # --- Base packages ---
 echo -e "${BLUE}>>> Installing base packages...${NC}"
@@ -254,13 +258,9 @@ echo -e "${BLUE}>>> Installing Tailscale...${NC}"
 curl -fsSL https://tailscale.com/install.sh | sh
 systemctl enable --now tailscaled
 
-read -p "Enter Tailscale auth key (leave blank for interactive login): " TSKEY
-if [ -n "$TSKEY" ]; then
-  if [[ "${ADV_ROUTES,,}" == "y" ]]; then
-    tailscale up --authkey=${TSKEY} --ssh --advertise-routes=$(ip -o -f inet addr show | awk '/scope global/ {print $4}' | paste -sd,)
-  else
-    tailscale up --authkey=${TSKEY} --ssh
-  fi
+read -p "Enter Tailscale auth key (leave blank for interactive login): " TSKEY || true
+if [ -n "${TSKEY:-}" ]; then
+  tailscale up --authkey=${TSKEY} --ssh
 else
   tailscale up --ssh
 fi
