@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ============================================================
 # Guacamole Install Script (Ubuntu 24.04+, ARM/AMD)
-# With built-in monitoring (screen + htop + iftop + logs)
+# With tmux dashboard, guacd IPv4 bind, and TightVNC (root)
 # ============================================================
 
 GUACVERSION="1.5.5"
@@ -12,7 +12,7 @@ GUAC_DB="guacamole_db"
 TOMCAT_VER=9.0.109
 CRED_FILE="/root/guacamole-credentials.txt"
 
-# Temporary bootstrap passwords
+# Temporary bootstrap passwords (rotated at end)
 MYSQL_ROOT_PWD="root"
 GUAC_PWD="guac"
 
@@ -21,8 +21,7 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
-
-log() { echo -e "$@"; }
+log(){ echo -e "$@"; }
 
 # ============================================================
 # Monitoring setup (tmux split screen)
@@ -35,37 +34,29 @@ if [ -z "${INSIDE_TMUX:-}" ]; then
   SCRIPT_PATH="$(realpath "$0")"
   SCRIPT_CMD="INSIDE_TMUX=1 bash \"$SCRIPT_PATH\" $*"
 
-  # Start tmux with installer in first window
   tmux new-session -d -s guac-install \
     "echo '>>> Running: $SCRIPT_CMD'; sleep 3; $SCRIPT_CMD"
-
-  # Add monitoring windows
   tmux split-window -h "htop"
   tmux split-window -v -t 0 "iftop -i \$(ip -o -4 route show to default | awk '{print \$5}' | head -n1)"
   tmux split-window -v -t 1 "tail -f /var/log/syslog"
-
   tmux select-layout tiled
   tmux attach -t guac-install
-
-  # Exit bootstrapper after attaching
   exit 0
 fi
 
-
 # ============================================================
-# Hostname detection (reverse DNS of IPv4)
+# Detect SERVER_NAME (IPv4 reverse DNS default)
 # ============================================================
 SERVER_NAME=${SERVER_NAME:-}
 if [ -z "$SERVER_NAME" ]; then
   PUBIP=$(curl -4 -s ifconfig.me || echo "")
   if [ -n "$PUBIP" ]; then
     apt-get install -y -qq dnsutils >/dev/null 2>&1 || true
-    REVNAME=$(dig +short -x $PUBIP @8.8.8.8 | sed 's/\.$//' || true)
+    REVNAME=$(dig +short -x "$PUBIP" @8.8.8.8 | sed 's/\.$//' || true)
     DEFAULT_NAME=${REVNAME:-$PUBIP}
   else
     DEFAULT_NAME="localhost"
   fi
-
   if [ -t 0 ]; then
     read -p "Enter server name for Nginx/Let's Encrypt [${DEFAULT_NAME}]: " SERVER_NAME
     SERVER_NAME=${SERVER_NAME:-$DEFAULT_NAME}
@@ -95,11 +86,11 @@ DEBIAN_FRONTEND=noninteractive apt-get install -yq \
 if ! command -v java >/dev/null 2>&1; then
   apt-get install -y openjdk-17-jre-headless
 fi
-JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))
+JAVA_HOME=$(dirname "$(dirname "$(readlink -f "$(which java)")")")
 log "${GREEN}JAVA_HOME=${JAVA_HOME}${NC}"
 
 # ============================================================
-# Firewall
+# Firewall basics (web only – VNC stays localhost)
 # ============================================================
 ufw --force enable
 ufw allow ssh
@@ -108,16 +99,16 @@ ufw allow 443/tcp
 ufw reload
 
 # ============================================================
-# Tomcat
+# Tomcat 9
 # ============================================================
 if [ ! -d /opt/apache-tomcat-${TOMCAT_VER} ]; then
   log "${BLUE}>>> Installing Tomcat ${TOMCAT_VER}...${NC}"
   cd /opt
-  wget -q https://downloads.apache.org/tomcat/tomcat-9/v${TOMCAT_VER}/bin/apache-tomcat-${TOMCAT_VER}.tar.gz
-  tar -xzf apache-tomcat-${TOMCAT_VER}.tar.gz
-  ln -sfn apache-tomcat-${TOMCAT_VER} tomcat9
-  useradd -r -s /usr/sbin/nologin tomcat || true
-  chown -R tomcat:tomcat /opt/apache-tomcat-${TOMCAT_VER}
+  wget -q "https://downloads.apache.org/tomcat/tomcat-9/v${TOMCAT_VER}/bin/apache-tomcat-${TOMCAT_VER}.tar.gz"
+  tar -xzf "apache-tomcat-${TOMCAT_VER}.tar.gz"
+  ln -sfn "apache-tomcat-${TOMCAT_VER}" tomcat9
+  id -u tomcat >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin tomcat
+  chown -R tomcat:tomcat "/opt/apache-tomcat-${TOMCAT_VER}"
   cat > /etc/systemd/system/tomcat9.service <<EOF
 [Unit]
 Description=Apache Tomcat 9
@@ -142,28 +133,28 @@ systemctl daemon-reload
 systemctl enable --now tomcat9
 
 # ============================================================
-# Guacamole
+# Guacamole (server + webapp + JDBC)
 # ============================================================
 cd /root
-SERVER="https://downloads.apache.org/guacamole/${GUACVERSION}"
-
-wget -q ${SERVER}/source/guacamole-server-${GUACVERSION}.tar.gz -O guacamole-server-${GUACVERSION}.tar.gz
-tar -xzf guacamole-server-${GUACVERSION}.tar.gz
-wget -q ${SERVER}/binary/guacamole-${GUACVERSION}.war -O /etc/guacamole.war
-wget -q ${SERVER}/binary/guacamole-auth-jdbc-${GUACVERSION}.tar.gz -O guacamole-auth-jdbc-${GUACVERSION}.tar.gz
-tar -xzf guacamole-auth-jdbc-${GUACVERSION}.tar.gz
+SERVER_URL="https://downloads.apache.org/guacamole/${GUACVERSION}"
+wget -q "${SERVER_URL}/source/guacamole-server-${GUACVERSION}.tar.gz" -O "guacamole-server-${GUACVERSION}.tar.gz"
+tar -xzf "guacamole-server-${GUACVERSION}.tar.gz"
+wget -q "${SERVER_URL}/binary/guacamole-${GUACVERSION}.war" -O /etc/guacamole.war
+wget -q "${SERVER_URL}/binary/guacamole-auth-jdbc-${GUACVERSION}.tar.gz" -O "guacamole-auth-jdbc-${GUACVERSION}.tar.gz"
+tar -xzf "guacamole-auth-jdbc-${GUACVERSION}.tar.gz"
 
 if ! command -v guacd >/dev/null 2>&1; then
-  cd guacamole-server-${GUACVERSION}
+  cd "guacamole-server-${GUACVERSION}"
   ./configure --with-systemd-dir=/etc/systemd/system
-  make -j$(nproc)
+  make -j"$(nproc)"
   make install
   ldconfig
   cd ..
 fi
 
+# ---------------- guacd: systemd unit (if not present) ----------------
 if [ ! -f /etc/systemd/system/guacd.service ]; then
-  cat > /etc/systemd/system/guacd.service <<EOF
+  cat > /etc/systemd/system/guacd.service <<'EOF'
 [Unit]
 Description=Guacamole proxy daemon
 After=network.target
@@ -178,18 +169,29 @@ Group=daemon
 WantedBy=multi-user.target
 EOF
 fi
-systemctl daemon-reload
+
+# ---------------- Configuring guacd (force IPv4) ----------------
+# Bind to 127.0.0.1:4822 to avoid ::1-only bind causing "Connection refused"
+log "${BLUE}Configuring guacd (IPv4 bind)...${NC}"
+mkdir -p /etc/guacamole
+cat > /etc/guacamole/guacd.conf <<'EOF'
+[server]
+bind_host = 127.0.0.1
+bind_port = 4822
+EOF
+systemctl daemon-reexec
 systemctl enable --now guacd
 
+# Webapp + JDBC extension
 mkdir -p /etc/guacamole/extensions /etc/guacamole/lib
 cp /etc/guacamole.war /opt/tomcat9/webapps/guacamole.war
-cp guacamole-auth-jdbc-${GUACVERSION}/mysql/guacamole-auth-jdbc-mysql-${GUACVERSION}.jar /etc/guacamole/extensions/
+cp "guacamole-auth-jdbc-${GUACVERSION}/mysql/guacamole-auth-jdbc-mysql-${GUACVERSION}.jar" /etc/guacamole/extensions/
 
 # ============================================================
-# JDBC Connector
+# JDBC Connector (prefer MariaDB, fallback to MySQL Connector/J)
 # ============================================================
 log "${BLUE}>>> Installing JDBC driver for MySQL/MariaDB...${NC}"
-if apt-cache show libmariadb-java 2>/dev/null | grep -q Package; then
+if apt-cache show libmariadb-java 2>/dev/null | grep -q '^Package:'; then
   apt-get install -y libmariadb-java
   ln -sf /usr/share/java/mariadb-java-client.jar /etc/guacamole/lib/mysql-connector-java.jar
   log "${GREEN}MariaDB JDBC connector installed.${NC}"
@@ -202,45 +204,34 @@ else
 fi
 
 # ============================================================
-# MySQL setup
+# MySQL / MariaDB
 # ============================================================
+# Set root password (switch from unix_socket to password)
 mysql -u root <<EOF
 ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PWD}';
 EOF
 
-if ! mysql -u root -p${MYSQL_ROOT_PWD} -e "USE ${GUAC_DB}" 2>/dev/null; then
-  mysql -u root -p${MYSQL_ROOT_PWD} -e "CREATE DATABASE ${GUAC_DB};"
+# DB + user
+if ! mysql -u root -p"${MYSQL_ROOT_PWD}" -e "USE ${GUAC_DB}" 2>/dev/null; then
+  mysql -u root -p"${MYSQL_ROOT_PWD}" -e "CREATE DATABASE ${GUAC_DB};"
 fi
 
-USER_EXISTS=$(mysql -u root -p${MYSQL_ROOT_PWD} -e "SELECT COUNT(*) FROM mysql.user WHERE user='${GUAC_USER}';" -s --skip-column-names)
+USER_EXISTS=$(mysql -u root -p"${MYSQL_ROOT_PWD}" -Nse "SELECT COUNT(*) FROM mysql.user WHERE user='${GUAC_USER}'")
 if [ "$USER_EXISTS" -eq 0 ]; then
-  mysql -u root -p${MYSQL_ROOT_PWD} -e "CREATE USER '${GUAC_USER}'@'localhost' IDENTIFIED BY '${GUAC_PWD}';"
-  mysql -u root -p${MYSQL_ROOT_PWD} -e "GRANT SELECT,INSERT,UPDATE,DELETE ON ${GUAC_DB}.* TO '${GUAC_USER}'@'localhost'; FLUSH PRIVILEGES;"
+  mysql -u root -p"${MYSQL_ROOT_PWD}" -e "CREATE USER '${GUAC_USER}'@'localhost' IDENTIFIED BY '${GUAC_PWD}';"
+  mysql -u root -p"${MYSQL_ROOT_PWD}" -e "GRANT SELECT,INSERT,UPDATE,DELETE ON ${GUAC_DB}.* TO '${GUAC_USER}'@'localhost'; FLUSH PRIVILEGES;"
 fi
 
-if ! mysql -u root -p${MYSQL_ROOT_PWD} -D ${GUAC_DB} -e "SHOW TABLES;" | grep -q guacamole_user; then
-  cat guacamole-auth-jdbc-${GUACVERSION}/mysql/schema/*.sql | mysql -u root -p${MYSQL_ROOT_PWD} ${GUAC_DB}
+# Schema load (first time)
+if ! mysql -u root -p"${MYSQL_ROOT_PWD}" -D "${GUAC_DB}" -e "SHOW TABLES;" | grep -q '^guacamole_user$'; then
+  cat "guacamole-auth-jdbc-${GUACVERSION}/mysql/schema/"*.sql | mysql -u root -p"${MYSQL_ROOT_PWD}" "${GUAC_DB}"
 fi
 
-# Inject default VNC and SSH connections
-mysql -u root -p${MYSQL_ROOT_PWD} ${GUAC_DB} <<'EOF'
-INSERT INTO guacamole_connection (connection_name, protocol) VALUES ('Default VNC', 'vnc');
-SET @CID = LAST_INSERT_ID();
-INSERT INTO guacamole_connection_parameter (connection_id, parameter_name, parameter_value)
-VALUES (@CID, 'hostname', 'localhost'), (@CID, 'port', '5901');
-INSERT INTO guacamole_connection_permission (entity_id, connection_id, permission)
-SELECT entity_id, @CID, perm FROM guacamole_entity, (SELECT 'READ' AS perm UNION ALL SELECT 'UPDATE' UNION ALL SELECT 'DELETE' UNION ALL SELECT 'ADMINISTER') p WHERE name='guacadmin';
-
-INSERT INTO guacamole_connection (connection_name, protocol) VALUES ('Default SSH', 'ssh');
-SET @CID = LAST_INSERT_ID();
-INSERT INTO guacamole_connection_parameter (connection_id, parameter_name, parameter_value)
-VALUES (@CID, 'hostname', 'localhost'), (@CID, 'port', '22');
-INSERT INTO guacamole_connection_permission (entity_id, connection_id, permission)
-SELECT entity_id, @CID, perm FROM guacamole_entity, (SELECT 'READ' AS perm UNION ALL SELECT 'UPDATE' UNION ALL SELECT 'DELETE' UNION ALL SELECT 'ADMINISTER') p WHERE name='guacadmin';
-EOF
-
-mkdir -p /etc/guacamole
+# Explicitly set DB + guacd params & disable DB SSL (common cause of failures)
 cat > /etc/guacamole/guacamole.properties <<EOF
+guacd-hostname: 127.0.0.1
+guacd-port: 4822
+
 mysql-hostname: localhost
 mysql-port: 3306
 mysql-database: ${GUAC_DB}
@@ -252,7 +243,7 @@ EOF
 systemctl restart tomcat9
 
 # ============================================================
-# Nginx reverse proxy
+# Nginx reverse proxy (root path "/")
 # ============================================================
 cat > /etc/nginx/sites-available/guacamole <<EOF
 server {
@@ -273,8 +264,8 @@ EOF
 ln -sf /etc/nginx/sites-available/guacamole /etc/nginx/sites-enabled/guacamole
 nginx -t && systemctl reload nginx
 
-# Let's Encrypt
-if certbot --nginx -d ${SERVER_NAME} --non-interactive --agree-tos -m admin@${SERVER_NAME} --redirect; then
+# Let's Encrypt (fallback to self-signed)
+if certbot --nginx -d "${SERVER_NAME}" --non-interactive --agree-tos -m "admin@${SERVER_NAME}" --redirect; then
   log "${GREEN}Let's Encrypt OK.${NC}"
 else
   mkdir -p /etc/ssl/selfsigned
@@ -309,31 +300,113 @@ EOF
 fi
 
 # ============================================================
-# Tailscale
+# TightVNC (root) + XFCE via systemd  <-- NEW/UPDATED
+# ============================================================
+log "${BLUE}>>> Configuring TightVNC for root (localhost only)...${NC}"
+
+# Generate a random 8-char VNC password (TightVNC allows up to 8)
+VNC_PWD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 8 || true)"
+mkdir -p /root/.vnc
+printf "%s" "${VNC_PWD}" | vncpasswd -f > /root/.vnc/passwd
+chmod 600 /root/.vnc/passwd
+
+# xstartup launching XFCE
+cat > /root/.vnc/xstartup <<'EOF'
+#!/bin/sh
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+xrdb $HOME/.Xresources
+startxfce4 &
+EOF
+chmod +x /root/.vnc/xstartup
+
+# systemd service for display :1 (port 5901), localhost only
+cat > /etc/systemd/system/vncserver@.service <<'EOF'
+[Unit]
+Description=TightVNC server on display %i
+After=network.target
+
+[Service]
+Type=forking
+User=root
+Group=root
+WorkingDirectory=/root
+PIDFile=/root/.vnc/%H:%i.pid
+# -localhost keeps it bound to 127.0.0.1 (not exposed)
+ExecStartPre=-/usr/bin/vncserver -kill :%i > /dev/null 2>&1
+ExecStart=/usr/bin/vncserver -depth 24 -geometry 1280x800 -localhost :%i
+ExecStop=/usr/bin/vncserver -kill :%i
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now vncserver@1.service
+
+# ============================================================
+# Create default Guacamole connections (VNC & SSH to localhost)
+# ============================================================
+mysql -u root -p"${MYSQL_ROOT_PWD}" "${GUAC_DB}" <<'EOF'
+-- VNC
+INSERT INTO guacamole_connection (connection_name, protocol)
+SELECT 'Default VNC','vnc' FROM DUAL
+WHERE NOT EXISTS (SELECT 1 FROM guacamole_connection WHERE connection_name='Default VNC');
+
+SET @CID := (SELECT connection_id FROM guacamole_connection WHERE connection_name='Default VNC');
+INSERT IGNORE INTO guacamole_connection_parameter (connection_id, parameter_name, parameter_value)
+VALUES (@CID,'hostname','localhost'),(@CID,'port','5901');
+
+-- Give guacadmin full perms on it
+INSERT IGNORE INTO guacamole_connection_permission (entity_id, connection_id, permission)
+SELECT e.entity_id, @CID, p.permission
+FROM guacamole_entity e
+JOIN (SELECT 'READ' AS permission UNION ALL SELECT 'UPDATE' UNION ALL SELECT 'DELETE' UNION ALL SELECT 'ADMINISTER') p
+WHERE e.name='guacadmin' AND e.type='USER';
+
+-- SSH
+INSERT INTO guacamole_connection (connection_name, protocol)
+SELECT 'Default SSH','ssh' FROM DUAL
+WHERE NOT EXISTS (SELECT 1 FROM guacamole_connection WHERE connection_name='Default SSH');
+
+SET @SID := (SELECT connection_id FROM guacamole_connection WHERE connection_name='Default SSH');
+INSERT IGNORE INTO guacamole_connection_parameter (connection_id, parameter_name, parameter_value)
+VALUES (@SID,'hostname','localhost'),(@SID,'port','22');
+
+INSERT IGNORE INTO guacamole_connection_permission (entity_id, connection_id, permission)
+SELECT e.entity_id, @SID, p.permission
+FROM guacamole_entity e
+JOIN (SELECT 'READ' AS permission UNION ALL SELECT 'UPDATE' UNION ALL SELECT 'DELETE' UNION ALL SELECT 'ADMINISTER') p
+WHERE e.name='guacadmin' AND e.type='USER';
+EOF
+
+systemctl restart tomcat9
+
+# ============================================================
+# Tailscale (optional, unchanged)
 # ============================================================
 log "${BLUE}>>> Installing Tailscale...${NC}"
 curl -fsSL https://tailscale.com/install.sh | sh
 systemctl enable --now tailscaled
-
 if [ -t 0 ]; then
   read -p "Enter Tailscale auth key (leave blank for interactive login): " TSKEY || true
 else
   TSKEY=""
 fi
 if [ -n "${TSKEY:-}" ]; then
-  tailscale up --authkey=${TSKEY} --ssh
+  tailscale up --authkey="${TSKEY}" --ssh
 else
   tailscale up --ssh
 fi
 
 # ============================================================
-# Rotate MySQL passwords at the end
+# Rotate MySQL passwords at the end (safe; updates guacamole.properties)
 # ============================================================
 FINAL_MYSQL_ROOT_PWD=$(openssl rand -base64 20)
 FINAL_GUAC_PWD=$(openssl rand -base64 20)
 
-mysql -u root -proot -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${FINAL_MYSQL_ROOT_PWD}';"
-mysql -u root -p${FINAL_MYSQL_ROOT_PWD} -e "ALTER USER '${GUAC_USER}'@'localhost' IDENTIFIED BY '${FINAL_GUAC_PWD}'; FLUSH PRIVILEGES;"
+mysql -u root -p"${MYSQL_ROOT_PWD}" -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${FINAL_MYSQL_ROOT_PWD}';"
+mysql -u root -p"${FINAL_MYSQL_ROOT_PWD}" -e "ALTER USER '${GUAC_USER}'@'localhost' IDENTIFIED BY '${FINAL_GUAC_PWD}'; FLUSH PRIVILEGES;"
 
 crudini --set /etc/guacamole/guacamole.properties '' mysql-password "${FINAL_GUAC_PWD}"
 systemctl restart tomcat9
@@ -341,31 +414,36 @@ systemctl restart tomcat9
 # ============================================================
 # Save credentials
 # ============================================================
-cat > ${CRED_FILE} <<EOF
-Guacamole admin login (default):
-   User: guacadmin
-   Pass: guacadmin
+cat > "${CRED_FILE}" <<EOF
+Guacamole URL:
+  https://${SERVER_NAME}/
 
-*** Change this password immediately after login! ***
+Default Guacamole admin:
+  User: guacadmin
+  Pass: guacadmin
+  (Change immediately in Settings → Preferences)
 
 MySQL root password:
-   ${FINAL_MYSQL_ROOT_PWD}
+  ${FINAL_MYSQL_ROOT_PWD}
 
-MySQL guacamole user (${GUAC_USER}) password:
-   ${FINAL_GUAC_PWD}
+MySQL Guacamole user (${GUAC_USER}) password:
+  ${FINAL_GUAC_PWD}
 
-Server name:
-   ${SERVER_NAME}
+TightVNC (root) password (for :1 / 5901):
+  ${VNC_PWD}
+
+Notes:
+  - VNC listens on localhost only (-localhost). Guacamole uses it via 'Default VNC'.
+  - guacd binds to 127.0.0.1:4822 (IPv4) to avoid ::1-only issues.
 EOF
-chmod 600 ${CRED_FILE}
+chmod 600 "${CRED_FILE}"
 
-IP=$(curl -4 -s ifconfig.me || echo "localhost")
+IP4=$(curl -4 -s ifconfig.me || echo "localhost")
 echo -e "${GREEN}=========================================================${NC}"
-echo -e "Guacamole running at: https://${SERVER_NAME}/"
-echo -e "Fallback: https://${IP}/"
-echo -e "Login: guacadmin / guacadmin"
-echo -e "MySQL root password:   ${FINAL_MYSQL_ROOT_PWD}"
-echo -e "MySQL guac user pass:  ${FINAL_GUAC_PWD}"
-echo -e "Credentials saved in:  ${CRED_FILE}"
-echo -e "${RED}*** Save them securely! ***${NC}"
+echo -e "Guacamole: https://${SERVER_NAME}/   (fallback https://${IP4}/ )"
+echo -e "Login: guacadmin / guacadmin  ${RED}(change immediately)${NC}"
+echo -e "MySQL root:   ${FINAL_MYSQL_ROOT_PWD}"
+echo -e "MySQL ${GUAC_USER}: ${FINAL_GUAC_PWD}"
+echo -e "VNC (root) password: ${VNC_PWD}   (localhost:5901)"
+echo -e "Saved in: ${CRED_FILE}"
 echo -e "${GREEN}=========================================================${NC}"
