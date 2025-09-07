@@ -84,7 +84,7 @@ fi
 log "${BLUE}>>> Installing base packages...${NC}"
 apt-get update -y
 DEBIAN_FRONTEND=noninteractive apt-get install -yq \
-    xfce4 xfce4-goodies tightvncserver ufw curl wget zsh firefox dnsutils \
+    xfce4 xfce4-goodies tightvncserver ufw curl wget zsh dnsutils \
     build-essential libjpeg-turbo8-dev libpng-dev libossp-uuid-dev \
     libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
     freerdp2-dev libpango1.0-dev libssh2-1-dev libtelnet-dev \
