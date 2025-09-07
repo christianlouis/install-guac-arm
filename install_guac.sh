@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # ============================================================
-# Guacamole Install Script (ARM/AMD, Ubuntu 24.04+)
+# Guacamole Install Script (Ubuntu 24.04+, ARM/AMD)
+# With built-in monitoring (screen + htop + iftop + logs)
 # ============================================================
 
 GUACVERSION="1.5.5"
@@ -22,6 +23,25 @@ GREEN='\033[0;32m'
 NC='\033[0m'
 
 log() { echo -e "$@"; }
+
+# ============================================================
+# Monitoring setup (screen + htop + iftop + logs)
+# ============================================================
+if [ -z "${INSIDE_SCREEN:-}" ]; then
+  apt-get update -y
+  apt-get install -y screen htop iftop
+  export INSIDE_SCREEN=1
+  screen -dmS guac-install bash -c "
+    screen -t installer bash -c \"INSIDE_SCREEN=1 $(realpath $0) $@\"
+    screen -t htop htop
+    screen -t iftop iftop -i \$(ip -o -4 route show to default | awk '{print \$5}' | head -n1)
+    screen -t logs tail -f /var/log/syslog
+    exec bash
+  "
+  echo -e \"${GREEN}Monitoring session started in screen 'guac-install'.${NC}\"
+  echo -e \"Use:  screen -r guac-install   to attach.${NC}\"
+  exit 0
+fi
 
 # ============================================================
 # Hostname detection (reverse DNS of IPv4)
