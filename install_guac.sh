@@ -9,9 +9,7 @@ GREEN='\033[0;32m'
 NC='\033[0m'
 
 GUACVERSION="1.5.5"
-MYSQL_ROOT_PWD="password"
 GUAC_USER="guacamole_user"
-GUAC_PWD="password"
 GUAC_DB="guacamole_db"
 TOMCAT_VER=9.0.109
 
@@ -21,7 +19,21 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-echo -e "${BLUE}>>> Updating apt & installing base packages...${NC}"
+# --- Interactive prompts ---
+read -p "Enter MySQL root password [default: password]: " MYSQL_ROOT_PWD
+MYSQL_ROOT_PWD=${MYSQL_ROOT_PWD:-password}
+
+read -p "Enter Guacamole DB user password [default: password]: " GUAC_PWD
+GUAC_PWD=${GUAC_PWD:-password}
+
+read -p "Enter server name (FQDN) for Nginx (e.g. guac.example.com): " SERVER_NAME
+if [ -z "$SERVER_NAME" ]; then
+  echo -e "${RED}Server name is required for Nginx reverse proxy${NC}"
+  exit 1
+fi
+
+# --- Base packages ---
+echo -e "${BLUE}>>> Installing base packages...${NC}"
 apt-get update -y
 DEBIAN_FRONTEND=noninteractive apt-get install -yq \
     xfce4 xfce4-goodies tightvncserver ufw curl wget zsh firefox \
@@ -30,24 +42,24 @@ DEBIAN_FRONTEND=noninteractive apt-get install -yq \
     freerdp2-dev libpango1.0-dev libssh2-1-dev libtelnet-dev \
     libvncserver-dev libpulse-dev libssl-dev libvorbis-dev libwebp-dev \
     libwebsockets-dev freerdp2-x11 libtool-bin ghostscript dpkg-dev crudini \
-    mariadb-server mariadb-client
+    mariadb-server mariadb-client nginx
 
-# ----------- Java ----------- #
+# --- Java ---
 if ! command -v java >/dev/null 2>&1; then
-  echo -e "${BLUE}>>> Installing OpenJDK 17...${NC}"
   apt-get install -y openjdk-17-jre-headless
 fi
 JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))
 echo -e "${GREEN}JAVA_HOME detected as ${JAVA_HOME}${NC}"
 
-# ----------- Firewall ----------- #
+# --- Firewall ---
 echo -e "${BLUE}>>> Configuring UFW...${NC}"
 ufw --force enable
 ufw allow ssh
-ufw allow 8080/tcp
+ufw allow 80/tcp
+ufw allow 443/tcp
 ufw reload
 
-# ----------- VNC Server ----------- #
+# --- VNC ---
 if [ ! -f "$HOME/.vnc/xstartup" ]; then
   echo -e "${BLUE}>>> Configuring VNC server...${NC}"
   umask 0077
@@ -85,7 +97,7 @@ EOF
 fi
 systemctl restart vncserver@1 || true
 
-# ----------- Tomcat 9 ----------- #
+# --- Tomcat 9 ---
 if [ ! -d /opt/apache-tomcat-${TOMCAT_VER} ]; then
   echo -e "${BLUE}>>> Installing Tomcat ${TOMCAT_VER}...${NC}"
   cd /opt
@@ -117,11 +129,12 @@ fi
 systemctl daemon-reload
 systemctl enable --now tomcat9
 
-# ----------- Guacamole ----------- #
+# --- Guacamole ---
 cd /root
+SERVER="https://downloads.apache.org/guacamole/${GUACVERSION}"
+
+# Download if missing
 if [ ! -d guacamole-server-${GUACVERSION} ]; then
-  echo -e "${BLUE}>>> Downloading Guacamole ${GUACVERSION}...${NC}"
-  SERVER="https://downloads.apache.org/guacamole/${GUACVERSION}"
   wget -q ${SERVER}/source/guacamole-server-${GUACVERSION}.tar.gz
   tar -xzf guacamole-server-${GUACVERSION}.tar.gz
   wget -q ${SERVER}/binary/guacamole-${GUACVERSION}.war -O /etc/guacamole.war
@@ -129,9 +142,8 @@ if [ ! -d guacamole-server-${GUACVERSION} ]; then
   tar -xzf guacamole-auth-jdbc-${GUACVERSION}.tar.gz
 fi
 
-# Build guacd if not installed
+# Build guacd if not present
 if ! command -v guacd >/dev/null 2>&1; then
-  echo -e "${BLUE}>>> Building guacd...${NC}"
   cd guacamole-server-${GUACVERSION}
   ./configure --with-systemd-dir=/etc/systemd/system
   make -j$(nproc)
@@ -165,12 +177,23 @@ mkdir -p /etc/guacamole/extensions /etc/guacamole/lib
 cp /etc/guacamole.war /opt/tomcat9/webapps/guacamole.war
 cp guacamole-auth-jdbc-${GUACVERSION}/mysql/guacamole-auth-jdbc-mysql-${GUACVERSION}.jar /etc/guacamole/extensions/
 
-# MySQL setup
+# MySQL setup (non-destructive)
 echo -e "${BLUE}>>> Setting up MySQL database...${NC}"
-mysql -u root -p${MYSQL_ROOT_PWD} -e "DROP DATABASE IF EXISTS ${GUAC_DB}; CREATE DATABASE ${GUAC_DB};"
-mysql -u root -p${MYSQL_ROOT_PWD} -e "DROP USER IF EXISTS '${GUAC_USER}'@'localhost'; CREATE USER '${GUAC_USER}'@'localhost' IDENTIFIED BY '${GUAC_PWD}'; GRANT SELECT,INSERT,UPDATE,DELETE ON ${GUAC_DB}.* TO '${GUAC_USER}'@'localhost'; FLUSH PRIVILEGES;"
-cat guacamole-auth-jdbc-${GUACVERSION}/mysql/schema/*.sql | mysql -u root -p${MYSQL_ROOT_PWD} ${GUAC_DB}
+if ! mysql -u root -p${MYSQL_ROOT_PWD} -e "USE ${GUAC_DB}" 2>/dev/null; then
+  mysql -u root -p${MYSQL_ROOT_PWD} -e "CREATE DATABASE ${GUAC_DB};"
+fi
 
+USER_EXISTS=$(mysql -u root -p${MYSQL_ROOT_PWD} -e "SELECT COUNT(*) FROM mysql.user WHERE user='${GUAC_USER}';" -s --skip-column-names)
+if [ "$USER_EXISTS" -eq 0 ]; then
+  mysql -u root -p${MYSQL_ROOT_PWD} -e "CREATE USER '${GUAC_USER}'@'localhost' IDENTIFIED BY '${GUAC_PWD}';"
+  mysql -u root -p${MYSQL_ROOT_PWD} -e "GRANT SELECT,INSERT,UPDATE,DELETE ON ${GUAC_DB}.* TO '${GUAC_USER}'@'localhost'; FLUSH PRIVILEGES;"
+fi
+
+if ! mysql -u root -p${MYSQL_ROOT_PWD} -D ${GUAC_DB} -e "SHOW TABLES;" | grep -q guacamole_user; then
+  cat guacamole-auth-jdbc-${GUACVERSION}/mysql/schema/*.sql | mysql -u root -p${MYSQL_ROOT_PWD} ${GUAC_DB}
+fi
+
+mkdir -p /etc/guacamole
 cat > /etc/guacamole/guacamole.properties <<EOF
 mysql-hostname: localhost
 mysql-port: 3306
@@ -181,7 +204,7 @@ EOF
 
 systemctl restart tomcat9
 
-# ----------- Chrome ----------- #
+# --- Chrome ---
 if ! command -v google-chrome >/dev/null 2>&1; then
   echo -e "${BLUE}>>> Installing Google Chrome...${NC}"
   ARCH=$(dpkg --print-architecture)
@@ -196,11 +219,10 @@ if ! command -v google-chrome >/dev/null 2>&1; then
   rm -f "$TMP_DEB"
 fi
 
-# ----------- Tampermonkey ----------- #
+# --- Tampermonkey ---
 EXT_ID="dhdgffkkebhmkfjojejmpbldmpobfkfo"
 EXT_DIR="/opt/google/chrome/extensions"
 if [ ! -f "$EXT_DIR/$EXT_ID.json" ]; then
-  echo -e "${BLUE}>>> Registering Tampermonkey...${NC}"
   mkdir -p "$EXT_DIR"
   cat > "$EXT_DIR/$EXT_ID.json" <<EOF
 {
@@ -209,10 +231,34 @@ if [ ! -f "$EXT_DIR/$EXT_ID.json" ]; then
 EOF
 fi
 
-# ----------- Final info ----------- #
+# --- Nginx reverse proxy ---
+echo -e "${BLUE}>>> Configuring Nginx reverse proxy...${NC}"
+cat > /etc/nginx/sites-available/guacamole <<EOF
+server {
+    listen 80;
+    server_name ${SERVER_NAME};
+
+    location / {
+        proxy_pass http://127.0.0.1:8080/guacamole/;
+        proxy_buffering off;
+        proxy_http_version 1.1;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$http_connection;
+        proxy_cookie_path /guacamole/ /;
+    }
+}
+EOF
+
+ln -sf /etc/nginx/sites-available/guacamole /etc/nginx/sites-enabled/guacamole
+nginx -t && systemctl restart nginx
+
+# --- Final info ---
 IP=$(curl -s ifconfig.me || echo "localhost")
 echo -e "${GREEN}=========================================================${NC}"
-echo -e "Guacamole URL: ${GREEN}http://${IP}:8080/guacamole${NC}"
+echo -e "Guacamole is now running behind Nginx."
+echo -e "URL:  http://${SERVER_NAME}/"
+echo -e "      http://${IP}/ (if DNS not set)"
 echo -e "Login: ${GREEN}guacadmin/guacadmin${NC}"
-echo -e "${RED}*** Change the password immediately! ***${NC}"
+echo -e "${RED}*** Change the default password immediately! ***${NC}"
 echo -e "${GREEN}=========================================================${NC}"
