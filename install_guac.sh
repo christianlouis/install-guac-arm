@@ -1,58 +1,87 @@
 #!/bin/bash
 set -euo pipefail
 
-# Colors
+# --- Defaults ---
+GUACVERSION="1.5.5"
+GUAC_USER="guacamole_user"
+GUAC_DB="guacamole_db"
+TOMCAT_VER=9.0.109
+CRED_FILE="/root/guacamole-credentials.txt"
+VERBOSE=false
+
+# --- Temporary defaults (safe for reruns) ---
+MYSQL_ROOT_PWD="root"
+GUAC_PWD="guac"
+GUACADMIN_PWD="guacadmin"
+
+# --- Colors ---
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
 
-GUACVERSION="1.5.5"
-GUAC_USER="guacamole_user"
-GUAC_DB="guacamole_db"
-TOMCAT_VER=9.0.109
-CRED_FILE="/root/guacamole-credentials.txt"
+# --- Functions ---
+usage() {
+  cat <<EOF
+Usage: $0 [options]
 
-# --- Parameters (env, interactive, or reverse DNS fallback) ---
+Options:
+  --help            Show this help and exit
+  -v, --verbose     Enable verbose output
+  -q, --quiet       Suppress most output
+  SERVER_NAME=...   Set server FQDN (env variable)
+
+Examples:
+  SERVER_NAME=guac.example.com $0
+  SERVER_NAME=guac.example.com $0 -v
+EOF
+}
+
+log() {
+  if [ "$VERBOSE" = true ]; then
+    echo -e "$@"
+  fi
+}
+
+# --- Parse args ---
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --help) usage; exit 0 ;;
+    -v|--verbose) VERBOSE=true ;;
+    -q|--quiet) exec >/dev/null 2>&1 ;;
+    *) echo -e "${RED}Unknown option: $1${NC}"; usage; exit 1 ;;
+  esac
+  shift
+done
+
+# --- Hostname detection (reverse DNS via Google DNS) ---
 SERVER_NAME=${SERVER_NAME:-}
-
 if [ -z "$SERVER_NAME" ]; then
-  if [ -t 0 ]; then
-    while true; do
-      read -p "Enter server name (FQDN) for Nginx/Let's Encrypt (e.g. guac.example.com): " SERVER_NAME
-      [ -n "$SERVER_NAME" ] && break
-      echo -e "${RED}Server name cannot be empty!${NC}"
-    done
-  else
-    echo -e "${YELLOW}No SERVER_NAME provided, running non-interactively...${NC}"
-    PUBIP=$(curl -s ifconfig.me || echo "")
-    if [ -n "$PUBIP" ]; then
-      if command -v dig >/dev/null 2>&1; then
-        REVNAME=$(dig +short -x $PUBIP 2>/dev/null | sed 's/\.$//' || true)
-      else
-        REVNAME=$(host $PUBIP 2>/dev/null | awk '{print $5}' | sed 's/\.$//' || true)
-      fi
-      if [ -n "$REVNAME" ]; then
-        SERVER_NAME=$REVNAME
-        echo -e "${GREEN}Using reverse DNS for server name: ${SERVER_NAME}${NC}"
-      else
-        SERVER_NAME=$PUBIP
-        echo -e "${YELLOW}No reverse DNS found, using IP: ${SERVER_NAME}${NC}"
-      fi
+  PUBIP=$(curl -s ifconfig.me || echo "")
+  if [ -n "$PUBIP" ]; then
+    apt-get install -y -qq dnsutils >/dev/null 2>&1 || true
+    REVNAME=$(dig +short -x $PUBIP @8.8.8.8 | sed 's/\.$//' || true)
+    if [ -n "$REVNAME" ]; then
+      DEFAULT_NAME=$REVNAME
     else
-      echo -e "${RED}Unable to detect public IP. Please set SERVER_NAME explicitly.${NC}"
-      exit 1
+      DEFAULT_NAME=$PUBIP
     fi
+  else
+    DEFAULT_NAME="localhost"
+  fi
+
+  if [ -t 0 ]; then
+    read -p "Enter server name for Nginx/Let's Encrypt [${DEFAULT_NAME}]: " SERVER_NAME
+    SERVER_NAME=${SERVER_NAME:-$DEFAULT_NAME}
+  else
+    SERVER_NAME=$DEFAULT_NAME
+    echo -e "${YELLOW}No SERVER_NAME provided, using default: ${SERVER_NAME}${NC}"
   fi
 fi
 
-MYSQL_ROOT_PWD=${MYSQL_ROOT_PWD:-$(openssl rand -base64 20)}
-GUAC_PWD=${GUAC_PWD:-$(openssl rand -base64 20)}
-GUACADMIN_PWD=${GUACADMIN_PWD:-$(openssl rand -base64 20)}
-
-# --- Base packages ---
-echo -e "${BLUE}>>> Installing base packages...${NC}"
+# --- Install base packages ---
+log "${BLUE}>>> Installing base packages...${NC}"
 apt-get update -y
 DEBIAN_FRONTEND=noninteractive apt-get install -yq \
     xfce4 xfce4-goodies tightvncserver ufw curl wget zsh firefox dnsutils \
@@ -68,7 +97,7 @@ if ! command -v java >/dev/null 2>&1; then
   apt-get install -y openjdk-17-jre-headless
 fi
 JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))
-echo -e "${GREEN}JAVA_HOME detected as ${JAVA_HOME}${NC}"
+log "${GREEN}JAVA_HOME detected as ${JAVA_HOME}${NC}"
 
 # --- Firewall ---
 ufw --force enable
@@ -79,7 +108,7 @@ ufw reload
 
 # --- Tomcat 9 ---
 if [ ! -d /opt/apache-tomcat-${TOMCAT_VER} ]; then
-  echo -e "${BLUE}>>> Installing Tomcat ${TOMCAT_VER}...${NC}"
+  log "${BLUE}>>> Installing Tomcat ${TOMCAT_VER}...${NC}"
   cd /opt
   wget -q https://downloads.apache.org/tomcat/tomcat-9/v${TOMCAT_VER}/bin/apache-tomcat-${TOMCAT_VER}.tar.gz
   tar -xzf apache-tomcat-${TOMCAT_VER}.tar.gz
@@ -153,8 +182,8 @@ mkdir -p /etc/guacamole/extensions /etc/guacamole/lib
 cp /etc/guacamole.war /opt/tomcat9/webapps/guacamole.war
 cp guacamole-auth-jdbc-${GUACVERSION}/mysql/guacamole-auth-jdbc-mysql-${GUACVERSION}.jar /etc/guacamole/extensions/
 
-# --- MySQL setup ---
-echo -e "${BLUE}>>> Setting up MySQL database...${NC}"
+# --- MySQL setup with defaults ---
+log "${BLUE}>>> Setting up MySQL with defaults...${NC}"
 mysql -u root <<EOF
 ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PWD}';
 EOF
@@ -182,39 +211,7 @@ mysql-username: ${GUAC_USER}
 mysql-password: ${GUAC_PWD}
 EOF
 
-# --- Reset guacadmin password (schema compatibility) ---
-if mysql -u root -p${MYSQL_ROOT_PWD} ${GUAC_DB} -e "SHOW COLUMNS FROM guacamole_user LIKE 'username';" | grep -q username; then
-  COL="username"
-else
-  COL="user_id"
-fi
-HASHED=$(echo -n "${GUACADMIN_PWD}" | openssl md5 | awk '{print $2}')
-mysql -u root -p${MYSQL_ROOT_PWD} ${GUAC_DB} -e "UPDATE guacamole_user SET password='${HASHED}' WHERE ${COL}='guacadmin';"
-
 systemctl restart tomcat9
-
-# --- Chrome + Tampermonkey ---
-if ! command -v google-chrome >/dev/null 2>&1; then
-  ARCH=$(dpkg --print-architecture)
-  if [ "$ARCH" = "amd64" ]; then
-    CHROME_DEB="https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
-  elif [ "$ARCH" = "arm64" ]; then
-    CHROME_DEB="https://dl.google.com/linux/direct/google-chrome-stable_current_arm64.deb"
-  fi
-  TMP_DEB="/tmp/chrome.deb"
-  wget -q -O "$TMP_DEB" "$CHROME_DEB"
-  dpkg -i "$TMP_DEB" || apt-get install -f -y
-  rm -f "$TMP_DEB"
-fi
-
-EXT_ID="dhdgffkkebhmkfjojejmpbldmpobfkfo"
-EXT_DIR="/opt/google/chrome/extensions"
-mkdir -p "$EXT_DIR"
-cat > "$EXT_DIR/$EXT_ID.json" <<EOF
-{
-  "external_update_url": "https://clients2.google.com/service/update2/crx"
-}
-EOF
 
 # --- Nginx reverse proxy ---
 cat > /etc/nginx/sites-available/guacamole <<EOF
@@ -238,7 +235,7 @@ nginx -t && systemctl reload nginx
 
 # --- Let's Encrypt with fallback ---
 if certbot --nginx -d ${SERVER_NAME} --non-interactive --agree-tos -m admin@${SERVER_NAME} --redirect; then
-  echo -e "${GREEN}Let's Encrypt certificate installed successfully.${NC}"
+  log "${GREEN}Let's Encrypt certificate installed successfully.${NC}"
 else
   mkdir -p /etc/ssl/selfsigned
   openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
@@ -288,17 +285,39 @@ else
   tailscale up --ssh
 fi
 
+# --- Final credential rotation ---
+FINAL_MYSQL_ROOT_PWD=$(openssl rand -base64 20)
+FINAL_GUAC_PWD=$(openssl rand -base64 20)
+FINAL_GUACADMIN_PWD=$(openssl rand -base64 20)
+
+mysql -u root -proot -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${FINAL_MYSQL_ROOT_PWD}';"
+mysql -u root -p${FINAL_MYSQL_ROOT_PWD} -e "ALTER USER '${GUAC_USER}'@'localhost' IDENTIFIED BY '${FINAL_GUAC_PWD}'; FLUSH PRIVILEGES;"
+
+# Update guacamole.properties with new DB password
+crudini --set /etc/guacamole/guacamole.properties '' mysql-password "${FINAL_GUAC_PWD}"
+
+# Reset guacadmin password
+if mysql -u root -p${FINAL_MYSQL_ROOT_PWD} ${GUAC_DB} -e "SHOW COLUMNS FROM guacamole_user LIKE 'username';" | grep -q username; then
+  COL="username"
+else
+  COL="user_id"
+fi
+HASHED=$(echo -n "${FINAL_GUACADMIN_PWD}" | openssl md5 | awk '{print $2}')
+mysql -u root -p${FINAL_MYSQL_ROOT_PWD} ${GUAC_DB} -e "UPDATE guacamole_user SET password='${HASHED}' WHERE ${COL}='guacadmin';"
+
+systemctl restart tomcat9
+
 # --- Save credentials ---
 cat > ${CRED_FILE} <<EOF
 Guacamole admin login:
    User: guacadmin
-   Pass: ${GUACADMIN_PWD}
+   Pass: ${FINAL_GUACADMIN_PWD}
 
 MySQL root password:
-   ${MYSQL_ROOT_PWD}
+   ${FINAL_MYSQL_ROOT_PWD}
 
 MySQL guacamole user (${GUAC_USER}) password:
-   ${GUAC_PWD}
+   ${FINAL_GUAC_PWD}
 
 Server name:
    ${SERVER_NAME}
@@ -311,9 +330,9 @@ echo -e "${GREEN}=========================================================${NC}"
 echo -e "Guacamole is now running behind Nginx."
 echo -e "URL:  https://${SERVER_NAME}/"
 echo -e "Alt:  https://${IP}/"
-echo -e "Login: guacadmin / ${GUACADMIN_PWD}"
-echo -e "MySQL root password:   ${MYSQL_ROOT_PWD}"
-echo -e "MySQL guac user pass:  ${GUAC_PWD}"
+echo -e "Login: guacadmin / ${FINAL_GUACADMIN_PWD}"
+echo -e "MySQL root password:   ${FINAL_MYSQL_ROOT_PWD}"
+echo -e "MySQL guac user pass:  ${FINAL_GUAC_PWD}"
 echo -e "Credentials saved in:  ${CRED_FILE}"
 echo -e "${RED}*** Save them securely! ***${NC}"
 echo -e "${GREEN}=========================================================${NC}"
