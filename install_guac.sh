@@ -25,21 +25,21 @@ NC='\033[0m'
 log() { echo -e "$@"; }
 
 # ============================================================
-# Monitoring setup (screen + htop + iftop + logs)
+# Monitoring setup (tmux split screen)
 # ============================================================
-if [ -z "${INSIDE_SCREEN:-}" ]; then
+if [ -z "${INSIDE_TMUX:-}" ]; then
   apt-get update -y
-  apt-get install -y screen htop iftop
-  export INSIDE_SCREEN=1
-  screen -dmS guac-install bash -c "
-    screen -t installer bash -c \"INSIDE_SCREEN=1 $(realpath $0) $@\"
-    screen -t htop htop
-    screen -t iftop iftop -i \$(ip -o -4 route show to default | awk '{print \$5}' | head -n1)
-    screen -t logs tail -f /var/log/syslog
-    exec bash
-  "
-  echo -e \"${GREEN}Monitoring session started in screen 'guac-install'.${NC}\"
-  echo -e \"Use:  screen -r guac-install   to attach.${NC}\"
+  apt-get install -y tmux htop iftop
+  export INSIDE_TMUX=1
+
+  SCRIPT_CMD="INSIDE_TMUX=1 $(realpath $0) $@"
+
+  tmux new-session -d -s guac-install "echo '>>> Running: $SCRIPT_CMD'; sleep 3; $SCRIPT_CMD"
+  tmux split-window -h "htop"
+  tmux split-window -v -t 0 "iftop -i \$(ip -o -4 route show to default | awk '{print \$5}' | head -n1)"
+  tmux split-window -v -t 1 "tail -f /var/log/syslog"
+  tmux select-layout tiled
+  tmux attach -t guac-install
   exit 0
 fi
 
