@@ -12,7 +12,6 @@ VERBOSE=false
 # --- Temporary defaults (safe for reruns) ---
 MYSQL_ROOT_PWD="root"
 GUAC_PWD="guac"
-GUACADMIN_PWD="guacadmin"
 
 # --- Colors ---
 YELLOW='\033[1;33m'
@@ -55,7 +54,7 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-# --- Hostname detection (reverse DNS via Google DNS) ---
+# --- Hostname detection (IPv4 only, reverse DNS via Google DNS) ---
 SERVER_NAME=${SERVER_NAME:-}
 if [ -z "$SERVER_NAME" ]; then
   PUBIP=$(curl -4 -s ifconfig.me || echo "")
@@ -76,7 +75,7 @@ if [ -z "$SERVER_NAME" ]; then
     SERVER_NAME=${SERVER_NAME:-$DEFAULT_NAME}
   else
     SERVER_NAME=$DEFAULT_NAME
-    echo -e "${YELLOW}No SERVER_NAME provided, using default: ${SERVER_NAME}${NC}"
+    echo -e "${YELLOW}No SERVER_NAME provided, using default (IPv4): ${SERVER_NAME}${NC}"
   fi
 fi
 
@@ -285,10 +284,9 @@ else
   tailscale up --ssh
 fi
 
-# --- Final credential rotation ---
+# --- Final credential rotation (MySQL only) ---
 FINAL_MYSQL_ROOT_PWD=$(openssl rand -base64 20)
 FINAL_GUAC_PWD=$(openssl rand -base64 20)
-FINAL_GUACADMIN_PWD=$(openssl rand -base64 20)
 
 mysql -u root -proot -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${FINAL_MYSQL_ROOT_PWD}';"
 mysql -u root -p${FINAL_MYSQL_ROOT_PWD} -e "ALTER USER '${GUAC_USER}'@'localhost' IDENTIFIED BY '${FINAL_GUAC_PWD}'; FLUSH PRIVILEGES;"
@@ -296,22 +294,15 @@ mysql -u root -p${FINAL_MYSQL_ROOT_PWD} -e "ALTER USER '${GUAC_USER}'@'localhost
 # Update guacamole.properties with new DB password
 crudini --set /etc/guacamole/guacamole.properties '' mysql-password "${FINAL_GUAC_PWD}"
 
-# Reset guacadmin password
-if mysql -u root -p${FINAL_MYSQL_ROOT_PWD} ${GUAC_DB} -e "SHOW COLUMNS FROM guacamole_user LIKE 'username';" | grep -q username; then
-  COL="username"
-else
-  COL="user_id"
-fi
-HASHED=$(echo -n "${FINAL_GUACADMIN_PWD}" | openssl md5 | awk '{print $2}')
-mysql -u root -p${FINAL_MYSQL_ROOT_PWD} ${GUAC_DB} -e "UPDATE guacamole_user SET password='${HASHED}' WHERE ${COL}='guacadmin';"
-
 systemctl restart tomcat9
 
 # --- Save credentials ---
 cat > ${CRED_FILE} <<EOF
-Guacamole admin login:
+Guacamole admin login (default):
    User: guacadmin
-   Pass: ${FINAL_GUACADMIN_PWD}
+   Pass: guacadmin
+
+*** IMPORTANT: Change this password immediately after login via the Guacamole UI! ***
 
 MySQL root password:
    ${FINAL_MYSQL_ROOT_PWD}
@@ -325,12 +316,12 @@ EOF
 chmod 600 ${CRED_FILE}
 
 # --- Final info ---
-IP=$(curl -s ifconfig.me || echo "localhost")
+IP=$(curl -4 -s ifconfig.me || echo "localhost")
 echo -e "${GREEN}=========================================================${NC}"
 echo -e "Guacamole is now running behind Nginx."
 echo -e "URL:  https://${SERVER_NAME}/"
 echo -e "Alt:  https://${IP}/"
-echo -e "Login: guacadmin / ${FINAL_GUACADMIN_PWD}"
+echo -e "Login: guacadmin / guacadmin (change immediately!)"
 echo -e "MySQL root password:   ${FINAL_MYSQL_ROOT_PWD}"
 echo -e "MySQL guac user pass:  ${FINAL_GUAC_PWD}"
 echo -e "Credentials saved in:  ${CRED_FILE}"
