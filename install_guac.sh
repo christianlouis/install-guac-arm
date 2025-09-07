@@ -14,20 +14,20 @@ GUAC_DB="guacamole_db"
 TOMCAT_VER=9.0.109
 CRED_FILE="/root/guacamole-credentials.txt"
 
+# --- Ask for parameters ---
+while true; do
+  read -p "Enter server name (FQDN) for Nginx/Let's Encrypt (e.g. guac.example.com): " SERVER_NAME
+  if [ -n "$SERVER_NAME" ]; then break; fi
+  echo -e "${RED}Server name cannot be empty!${NC}"
+done
+
+read -p "Advertise local LAN routes via Tailscale? (y/N): " ADV_ROUTES
+ADV_ROUTES=${ADV_ROUTES:-N}
+
 # --- Secure password generation ---
 MYSQL_ROOT_PWD=$(openssl rand -base64 20)
 GUAC_PWD=$(openssl rand -base64 20)
 GUACADMIN_PWD=$(openssl rand -base64 20)
-
-# --- Server name prompt ---
-while true; do
-  read -p "Enter server name (FQDN) for Nginx/Let's Encrypt (e.g. guac.example.com): " SERVER_NAME
-  if [ -n "$SERVER_NAME" ]; then
-    break
-  else
-    echo -e "${RED}Server name cannot be empty!${NC}"
-  fi
-done
 
 # --- Base packages ---
 echo -e "${BLUE}>>> Installing base packages...${NC}"
@@ -160,9 +160,14 @@ mysql-username: ${GUAC_USER}
 mysql-password: ${GUAC_PWD}
 EOF
 
-# Reset guacadmin password
+# --- Reset guacadmin password (schema compatibility) ---
+if mysql -u root -p${MYSQL_ROOT_PWD} ${GUAC_DB} -e "SHOW COLUMNS FROM guacamole_user LIKE 'username';" | grep -q username; then
+  COL="username"
+else
+  COL="user_id"
+fi
 HASHED=$(echo -n "${GUACADMIN_PWD}" | openssl md5 | awk '{print $2}')
-mysql -u root -p${MYSQL_ROOT_PWD} ${GUAC_DB} -e "UPDATE guacamole_user SET password='${HASHED}' WHERE username='guacadmin';"
+mysql -u root -p${MYSQL_ROOT_PWD} ${GUAC_DB} -e "UPDATE guacamole_user SET password='${HASHED}' WHERE ${COL}='guacadmin';"
 
 systemctl restart tomcat9
 
@@ -182,14 +187,12 @@ fi
 
 EXT_ID="dhdgffkkebhmkfjojejmpbldmpobfkfo"
 EXT_DIR="/opt/google/chrome/extensions"
-if [ ! -f "$EXT_DIR/$EXT_ID.json" ]; then
-  mkdir -p "$EXT_DIR"
-  cat > "$EXT_DIR/$EXT_ID.json" <<EOF
+mkdir -p "$EXT_DIR"
+cat > "$EXT_DIR/$EXT_ID.json" <<EOF
 {
   "external_update_url": "https://clients2.google.com/service/update2/crx"
 }
 EOF
-fi
 
 # --- Nginx reverse proxy ---
 cat > /etc/nginx/sites-available/guacamole <<EOF
@@ -251,13 +254,13 @@ echo -e "${BLUE}>>> Installing Tailscale...${NC}"
 curl -fsSL https://tailscale.com/install.sh | sh
 systemctl enable --now tailscaled
 
-echo
-echo "Tailscale auth:"
-echo "  - Enter auth key (from https://login.tailscale.com/admin/settings/keys)"
-echo "  - Leave blank for interactive login"
-read -p "Tailscale auth key: " TSKEY
+read -p "Enter Tailscale auth key (leave blank for interactive login): " TSKEY
 if [ -n "$TSKEY" ]; then
-  tailscale up --authkey=${TSKEY} --ssh
+  if [[ "${ADV_ROUTES,,}" == "y" ]]; then
+    tailscale up --authkey=${TSKEY} --ssh --advertise-routes=$(ip -o -f inet addr show | awk '/scope global/ {print $4}' | paste -sd,)
+  else
+    tailscale up --authkey=${TSKEY} --ssh
+  fi
 else
   tailscale up --ssh
 fi
