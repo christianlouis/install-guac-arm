@@ -10,7 +10,6 @@ GUAC_USER="guacamole_user"
 GUAC_DB="guacamole_db"
 TOMCAT_VER=9.0.109
 CRED_FILE="/root/guacamole-credentials.txt"
-VERBOSE=false
 
 # Temporary bootstrap passwords
 MYSQL_ROOT_PWD="root"
@@ -193,6 +192,23 @@ fi
 if ! mysql -u root -p${MYSQL_ROOT_PWD} -D ${GUAC_DB} -e "SHOW TABLES;" | grep -q guacamole_user; then
   cat guacamole-auth-jdbc-${GUACVERSION}/mysql/schema/*.sql | mysql -u root -p${MYSQL_ROOT_PWD} ${GUAC_DB}
 fi
+
+# Inject default VNC and SSH connections
+mysql -u root -p${MYSQL_ROOT_PWD} ${GUAC_DB} <<'EOF'
+INSERT INTO guacamole_connection (connection_name, protocol) VALUES ('Default VNC', 'vnc');
+SET @CID = LAST_INSERT_ID();
+INSERT INTO guacamole_connection_parameter (connection_id, parameter_name, parameter_value)
+VALUES (@CID, 'hostname', 'localhost'), (@CID, 'port', '5901');
+INSERT INTO guacamole_connection_permission (entity_id, connection_id, permission)
+SELECT entity_id, @CID, perm FROM guacamole_entity, (SELECT 'READ' AS perm UNION ALL SELECT 'UPDATE' UNION ALL SELECT 'DELETE' UNION ALL SELECT 'ADMINISTER') p WHERE name='guacadmin';
+
+INSERT INTO guacamole_connection (connection_name, protocol) VALUES ('Default SSH', 'ssh');
+SET @CID = LAST_INSERT_ID();
+INSERT INTO guacamole_connection_parameter (connection_id, parameter_name, parameter_value)
+VALUES (@CID, 'hostname', 'localhost'), (@CID, 'port', '22');
+INSERT INTO guacamole_connection_permission (entity_id, connection_id, permission)
+SELECT entity_id, @CID, perm FROM guacamole_entity, (SELECT 'READ' AS perm UNION ALL SELECT 'UPDATE' UNION ALL SELECT 'DELETE' UNION ALL SELECT 'ADMINISTER') p WHERE name='guacadmin';
+EOF
 
 mkdir -p /etc/guacamole
 cat > /etc/guacamole/guacamole.properties <<EOF
