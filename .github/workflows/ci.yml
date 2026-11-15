@@ -30,7 +30,7 @@ jobs:
             libavutil-dev libjpeg-turbo8-dev libossp-uuid-dev libpng-dev \
             libswscale-dev libtool libtool-bin libvncserver-dev libwebp-dev \
             libwebsockets-dev libpulse-dev libssl-dev libvorbis-dev \
-            libfreerdp-dev libpango1.0-dev libssh2-1-dev libtelnet-dev \
+            freerdp2-dev libpango1.0-dev libssh2-1-dev libtelnet-dev \
             pkg-config wget
       - name: Build Guacamole server 1.6.0 on ARM
         run: |
