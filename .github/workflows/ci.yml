@@ -1,0 +1,42 @@
+name: Installer checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  shell-check:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate installer without executing it
+        run: tests/test_install_guac.sh
+
+  server-build:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install isolated Guacamole server build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake build-essential libavcodec-dev libavformat-dev \
+            libavutil-dev libjpeg-turbo8-dev libossp-uuid-dev libpng-dev \
+            libswscale-dev libtool libtool-bin libvncserver-dev libwebp-dev \
+            libwebsockets-dev libpulse-dev libssl-dev libvorbis-dev \
+            freerdp2-dev libpango1.0-dev libssh2-1-dev libtelnet-dev \
+            pkg-config wget
+      - name: Build Guacamole server 1.6.0 on ARM
+        run: |
+          set -Eeuo pipefail
+          wget -q https://downloads.apache.org/guacamole/1.6.0/source/guacamole-server-1.6.0.tar.gz
+          tar -xzf guacamole-server-1.6.0.tar.gz
+          cd guacamole-server-1.6.0
+          ./configure --with-systemd-dir="$RUNNER_TEMP/systemd"
+          make -j"$(nproc)"
