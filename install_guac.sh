@@ -23,6 +23,36 @@ GREEN='\033[0;32m'
 NC='\033[0m'
 log(){ echo -e "$@"; }
 
+# This installer intentionally has no in-place upgrade path. Existing JDBC
+# extensions, Tomcat deployments, and database schemas require a planned
+# migration and backup; silently replacing only some of them is unsafe.
+fresh_install_guard() {
+  local state_root="${GUAC_STATE_ROOT:-/}"
+  local -a found=()
+  [[ -d "${state_root%/}/etc/guacamole" ]] && found+=("/etc/guacamole")
+  [[ -f "${state_root%/}/etc/guacamole.war" ]] && found+=("/etc/guacamole.war")
+  [[ -e "${state_root%/}/opt/tomcat9" ]] && found+=("/opt/tomcat9")
+  [[ -f "${state_root%/}/etc/systemd/system/tomcat9.service" ]] && found+=("tomcat9.service")
+  [[ -f "${state_root%/}/etc/systemd/system/guacd.service" ]] && found+=("guacd.service")
+  if command -v guacd >/dev/null 2>&1; then
+    local guacd_version
+    guacd_version="$(guacd -v 2>&1 | head -n 1 || true)"
+    found+=("guacd (${guacd_version})")
+  fi
+  if ((${#found[@]})); then
+    log "${RED}Existing Guacamole/Tomcat state detected: ${found[*]}${NC}" >&2
+    log "${RED}Fresh-install only: aborting before any system mutation. Back up and plan JDBC/schema migration separately.${NC}" >&2
+    return 1
+  fi
+}
+
+if [[ "${GUAC_TEST_ONLY:-0}" == 1 ]]; then
+  fresh_install_guard
+  exit $?
+fi
+
+fresh_install_guard
+
 # ============================================================
 # Monitoring setup (tmux split screen)
 # ============================================================
