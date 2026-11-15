@@ -6,10 +6,10 @@ set -euo pipefail
 # With tmux dashboard, guacd IPv4 bind, and TightVNC (root)
 # ============================================================
 
-GUACVERSION="1.5.5"
+GUACVERSION="1.6.0"
 GUAC_USER="guacamole_user"
 GUAC_DB="guacamole_db"
-TOMCAT_VER=9.0.109
+TOMCAT_VER=9.0.124
 CRED_FILE="/root/guacamole-credentials.txt"
 
 # Temporary bootstrap passwords (rotated at end)
@@ -106,7 +106,6 @@ if [ ! -d /opt/apache-tomcat-${TOMCAT_VER} ]; then
   cd /opt
   wget -q "https://downloads.apache.org/tomcat/tomcat-9/v${TOMCAT_VER}/bin/apache-tomcat-${TOMCAT_VER}.tar.gz"
   tar -xzf "apache-tomcat-${TOMCAT_VER}.tar.gz"
-  ln -sfn "apache-tomcat-${TOMCAT_VER}" tomcat9
   id -u tomcat >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin tomcat
   chown -R tomcat:tomcat "/opt/apache-tomcat-${TOMCAT_VER}"
   cat > /etc/systemd/system/tomcat9.service <<EOF
@@ -129,6 +128,7 @@ SuccessExitStatus=143
 WantedBy=multi-user.target
 EOF
 fi
+ln -sfn "apache-tomcat-${TOMCAT_VER}" /opt/tomcat9
 systemctl daemon-reload
 systemctl enable --now tomcat9
 
@@ -143,7 +143,12 @@ wget -q "${SERVER_URL}/binary/guacamole-${GUACVERSION}.war" -O /etc/guacamole.wa
 wget -q "${SERVER_URL}/binary/guacamole-auth-jdbc-${GUACVERSION}.tar.gz" -O "guacamole-auth-jdbc-${GUACVERSION}.tar.gz"
 tar -xzf "guacamole-auth-jdbc-${GUACVERSION}.tar.gz"
 
-if ! command -v guacd >/dev/null 2>&1; then
+guacd_is_current() {
+  command -v guacd >/dev/null 2>&1 && guacd -v 2>&1 | grep -Fq "version ${GUACVERSION}"
+}
+
+if ! guacd_is_current; then
+  log "${BLUE}>>> Building guacd ${GUACVERSION} (missing or older installed version)...${NC}"
   cd "guacamole-server-${GUACVERSION}"
   ./configure --with-systemd-dir=/etc/systemd/system
   make -j"$(nproc)"
